@@ -30,6 +30,7 @@ const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 });
 const animals = ["urso", "pinguim", "capivara", "panda"];
 const recentTicks = new Map();
+const loginFailures = new Map();
 
 const cleanUsername = value => String(value || "").trim();
 const validUsername = value => /^[A-Za-z0-9_]{3,20}$/.test(value);
@@ -109,7 +110,7 @@ app.post("/api/register", async (req, res) => {
     const password = String(req.body.password || "");
     const animal = String(req.body.animal || "");
     if (!validUsername(username)) return res.status(400).json({ error: "Usuário: 3 a 20 caracteres, letras, números ou _." });
-    if (password.length < 8 || password.length > 72) return res.status(400).json({ error: "A senha deve ter entre 8 e 72 caracteres." });
+    if (!/^\\d{4}$/.test(password)) return res.status(400).json({ error: "O PIN deve ter exatamente 4 números." });
     if (!animals.includes(animal)) return res.status(400).json({ error: "Escolha um animal válido." });
     const password_hash = await bcrypt.hash(password, 12);
     const user = await dbError(db.from("game_users").insert({ username, password_hash }).select("id, username").single());
@@ -131,8 +132,19 @@ app.post("/api/login", async (req, res) => {
   try {
     const username = cleanUsername(req.body.username);
     const password = String(req.body.password || "");
+    if (!/^\\d{4}$/.test(password)) return res.status(400).json({ error: "Digite seu PIN de 4 números." });
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    const key = ip + ":" + username.toLowerCase();
+    const attempts = loginFailures.get(key) || { count: 0, until: 0 };
+    if (attempts.until > Date.now()) return res.status(429).json({ error: "Muitas tentativas. Aguarde 15 minutos." });
     const user = await dbError(db.from("game_users").select("id, username, password_hash").eq("username", username).maybeSingle());
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: "Usuário ou senha incorretos." });
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      attempts.count += 1;
+      if (attempts.count >= 5) { attempts.count = 0; attempts.until = Date.now() + 15 * 60 * 1000; }
+      loginFailures.set(key, attempts);
+      return res.status(401).json({ error: "Usuário ou PIN incorretos." });
+    }
+    loginFailures.delete(key);
     res.json({ token: makeToken(user), user: { id: user.id, username: user.username } });
   } catch (error) {
     console.error("login:", error.message);
