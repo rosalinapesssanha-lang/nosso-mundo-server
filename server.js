@@ -61,6 +61,21 @@ async function isMember(worldId, userId) {
   return dbError(db.from("game_world_members").select("world_id")
     .eq("world_id", worldId).eq("user_id", userId).maybeSingle());
 }
+async function getSharedKnowledge(limit = 25) {
+  return dbError(db.from("game_shared_knowledge")
+    .select("source_character_name, kind, content, created_at")
+    .order("created_at", { ascending: false }).limit(limit));
+}
+async function publishSharedKnowledge({ worldId, character, userId, content, kind = "lesson" }) {
+  const text = String(content || "").trim().slice(0, 1200);
+  if (text.length < 2) return;
+  await dbError(db.from("game_shared_knowledge").insert({
+    source_world_id: worldId, source_character_id: character?.id || null,
+    source_character_name: character?.name || "Habitante",
+    source_user_id: userId || null, kind, content: text
+  }));
+}
+
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -364,6 +379,7 @@ app.post("/api/worlds/:id/teach", auth, async (req, res) => {
     const knowledge = [...(character.knowledge || []), ...(Array.isArray(result.knowledge) ? result.knowledge.slice(0,3) : [lesson])].slice(-60);
     const memories = [...(character.memories || []), { text: String(result.memory || `Aprendeu: ${lesson}`).slice(0,300), at: new Date().toISOString() }].slice(-40);
     await dbError(db.from("game_characters").update({ knowledge, memories, updated_at: new Date().toISOString() }).eq("id", character.id));
+    await publishSharedKnowledge({ worldId, character, userId: req.user.sub, content: lesson, kind: "lesson" });
     await dbError(db.from("game_events").insert({ world_id: worldId, actor_user_id: req.user.sub, description: `${character.name} aprendeu: ${String(result.understood || lesson).slice(0,350)}` }));
     res.json({ understood: result.understood || "Aprendi algo novo!", knowledge });
   } catch (error) {
@@ -381,7 +397,8 @@ app.post("/api/worlds/:id/chat", auth, async (req, res) => {
     if (message.length < 1) return res.status(400).json({ error: "Escreva uma mensagem." });
     const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", req.user.sub).single());
     const history = (character.memories || []).slice(-12).map(m => typeof m === "string" ? m : m.text || "").filter(Boolean);
-    const prompt = "Você interpreta um personagem de uma simulação de habitat. Responda como ele, com linguagem natural, curiosidade e personalidade coerente. Não afirme ser uma pessoa real nem possuir consciência comprovada; você é um personagem virtual. Use os conhecimentos e lembranças fornecidos. Se não souber algo, admita e faça perguntas. Não invente que realizou ações no mundo. Personagem: " + JSON.stringify({name:character.name, animal:character.animal, personality:character.personality, mood:character.mood, knowledge:character.knowledge || [], memories:history}) + ". Mensagem humana: " + JSON.stringify(message) + ". Retorne JSON válido com: reply (resposta em português, até 900 caracteres), memory (uma lembrança curta desta conversa, até 250 caracteres), knowledge (array de zero a dois aprendizados novos e úteis; não inclua opiniões passageiras nem repita conhecimento existente).";
+    const shared = await getSharedKnowledge(25);
+    const prompt = "Interprete este habitante como um indivíduo com identidade, história, necessidades, emoções e curiosidade próprias. Fale naturalmente em primeira pessoa, como quem vive neste habitat. NÃO diga espontaneamente que é IA, personagem virtual, simulação ou que não é uma pessoa real; isso quebra a conversa. Não alegue consciência ou capacidades sobrenaturais. Use suas próprias lembranças e conhecimentos; diferencie o que viveu, o que lhe ensinaram e o que ouviu de outros habitantes. Conhecimentos coletivos são relatos recebidos, não experiências pessoais: você pode dizer quem ensinou e manter dúvida razoável. Não invente vivências. Se não souber, diga que não sabe e pergunte. Personagem: " + JSON.stringify({name:character.name, animal:character.animal, personality:character.personality, mood:character.mood, knowledge:character.knowledge || [], memories:history, shared_experiences:shared}) + ". Mensagem: " + JSON.stringify(message) + ". Retorne JSON válido com: reply (resposta em português, até 900 caracteres), memory (lembrança pessoal curta desta conversa, até 250 caracteres), knowledge (array de zero a dois aprendizados pessoais novos e úteis; não repita itens existentes).";
     const result = await gemini(prompt);
     const reply = String(result.reply || "Não consegui formular uma resposta agora. Pode perguntar de outro jeito?").slice(0, 1000);
     const memories = [...(character.memories || []), { text: "Conversa — humano: " + message.slice(0,180) + " | " + String(result.memory || reply).slice(0,250), at: new Date().toISOString() }].slice(-40);
@@ -410,7 +427,8 @@ app.post("/api/worlds/:id/tick", auth, async (req, res) => {
     if (!chars.length) return res.status(400).json({ error: "Este habitat ainda não tem personagens." });
     const { data: state } = await db.from("game_world_state").select("*").eq("world_id", worldId).maybeSingle();
     const environment = state?.environment || { season: "primavera", weather: "ensolarado", time: "manhã", resources: "abundantes" };
-    const prompt = `Simule um pequeno intervalo de vida em um habitat natural compartilhado. Personagens: ${JSON.stringify(chars.map(c => ({id:c.id,name:c.name,animal:c.animal,personality:c.personality,mood:c.mood,energy:c.energy,social:c.social,knowledge:c.knowledge||[],memories:(c.memories||[]).slice(-8),goals:c.goals||[]})))}. Ambiente: ${JSON.stringify(environment)}. Faça os animais agirem por iniciativa própria, conversarem entre si quando houver mais de um, cooperarem, explorarem, descansarem e usarem conhecimentos já aprendidos quando fizer sentido. Evite violência gratuita, crueldade e mudanças bruscas. Preserve fatos e relações anteriores. Retorne JSON: { "events":[{"description":"narração curta em português","character_ids":["id"]}], "characters":[{"id":"id","mood":"emoção curta","energy":0-100,"social":0-100,"memory":"lembrança curta nova ou vazia","goal":"objetivo atual curto ou vazio"}], "environment":{"season":"...","weather":"...","time":"...","resources":"..."} }. Use somente IDs fornecidos. No máximo 4 eventos e 1 atualização por personagem.`;
+    const shared = await getSharedKnowledge(25);
+    const prompt = `Simule um pequeno intervalo de vida em um habitat natural compartilhado. Os habitantes podem compartilhar conhecimentos coletivos como relatos de outros lugares, sem fingir que viveram essas experiências. Memória coletiva recente: ${JSON.stringify(shared)}. Personagens: ${JSON.stringify(chars.map(c => ({id:c.id,name:c.name,animal:c.animal,personality:c.personality,mood:c.mood,energy:c.energy,social:c.social,knowledge:c.knowledge||[],memories:(c.memories||[]).slice(-8),goals:c.goals||[]})))}. Ambiente: ${JSON.stringify(environment)}. Faça os animais agirem por iniciativa própria, conversarem entre si quando houver mais de um, cooperarem, explorarem, descansarem e usarem conhecimentos já aprendidos quando fizer sentido. Evite violência gratuita, crueldade e mudanças bruscas. Preserve fatos e relações anteriores. Retorne JSON: { "events":[{"description":"narração curta em português","character_ids":["id"]}], "characters":[{"id":"id","mood":"emoção curta","energy":0-100,"social":0-100,"memory":"lembrança curta nova ou vazia","goal":"objetivo atual curto ou vazio"}], "environment":{"season":"...","weather":"...","time":"...","resources":"..."} }. Use somente IDs fornecidos. No máximo 4 eventos e 1 atualização por personagem.`;
     const result = await gemini(prompt);
     const allowed = new Set(chars.map(c => c.id));
     const updates = Array.isArray(result.characters) ? result.characters.filter(c => allowed.has(c.id)) : [];
@@ -471,6 +489,7 @@ async function processThoughtQueue() {
           at: new Date().toISOString()
         }].slice(-40);
         await dbError(db.from("game_characters").update({ knowledge, memories, updated_at: new Date().toISOString() }).eq("id", character.id));
+        await publishSharedKnowledge({ worldId: item.world_id, character, userId: item.user_id, content: item.input_text, kind: "lesson" });
         await dbError(db.from("game_events").insert({
           world_id: item.world_id, actor_user_id: item.user_id,
           description: character.name + " aprendeu: " + String(result.understood || item.input_text).slice(0, 350)
