@@ -5,11 +5,13 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { createClient } = require("@supabase/supabase-js");
 const crypto = require("crypto");
+const path = require("path");
 
 const app = express();
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "32kb" }));
+app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = process.env.PORT || 10000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -278,14 +280,10 @@ async function processThoughtQueue() {
   thoughtWorkerRunning = true;
   try {
     while (true) {
-      const item = await dbError(db.from("game_thought_queue").select("*")
-        .eq("status", "queued").order("created_at", { ascending: true }).limit(1).maybeSingle());
+      const claimedRows = await dbError(db.rpc("claim_next_game_thought"));
+      const item = Array.isArray(claimedRows) ? claimedRows[0] : claimedRows;
       if (!item) break;
-      const claimed = await dbError(db.from("game_thought_queue").update({
-        status: "processing", progress: 8, stage: "Preparando o pensamento",
-        started_at: new Date().toISOString(), updated_at: new Date().toISOString()
-      }).eq("id", item.id).eq("status", "queued").select("id").maybeSingle());
-      if (!claimed) continue;
+      await updateThought(item.id, { progress: 18, stage: "Lendo o ensinamento" });
       try {
         await updateThought(item.id, { progress: 18, stage: "Lendo o ensinamento" });
         const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", item.user_id).single());
@@ -310,14 +308,14 @@ async function processThoughtQueue() {
         await updateThought(item.id, {
           status: "completed", progress: 100, stage: "Concluído",
           result: { understood: result.understood || "Aprendi algo novo!", knowledge },
-          finished_at: new Date().toISOString()
+          finished_at: new Date().toISOString(), lease_until: null
         });
       } catch (error) {
         console.error("thought queue item:", item.id, error.message);
         await updateThought(item.id, {
           status: "failed", progress: 100, stage: "Não foi possível concluir",
           error_message: String(error.message || "Erro desconhecido").slice(0, 500),
-          finished_at: new Date().toISOString()
+          finished_at: new Date().toISOString(), lease_until: null
         });
       }
     }
@@ -367,11 +365,7 @@ app.get("/api/worlds/:id/thoughts", auth, async (req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`Nosso Mundo API rodando na porta ${PORT}`);
-  // Se o processo reiniciou durante uma chamada, devolve o item à fila.
-  const { error } = await db.from("game_thought_queue").update({
-    status: "queued", progress: 0, stage: "Retomado após reinício", started_at: null,
-    updated_at: new Date().toISOString()
-  }).eq("status", "processing");
-  if (error) console.error("queue recovery:", error.message);
-  else processThoughtQueue();
+  // A função SQL reivindica itens com bloqueio atômico; itens abandonados
+  // são retomados automaticamente quando a concessão de 2 minutos expira.
+  processThoughtQueue();
 });
