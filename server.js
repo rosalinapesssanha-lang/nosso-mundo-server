@@ -78,8 +78,8 @@ function availableAIProviders() {
 
 function extractJson(text) {
   const clean = String(text || "").trim()
-    .replace(new RegExp("^" + String.fromCharCode(96).repeat(3) + "(?:json)?\\\\s*", "i"), "")
-    .replace(new RegExp("\\\\s*" + String.fromCharCode(96).repeat(3) + "$"), "");
+    .replace(new RegExp("^" + String.fromCharCode(96).repeat(3) + "(?:json)?\\s*", "i"), "")
+    .replace(new RegExp("\\s*" + String.fromCharCode(96).repeat(3) + "$"), "");
   try { return JSON.parse(clean); } catch {}
   const first = clean.indexOf("{");
   const last = clean.lastIndexOf("}");
