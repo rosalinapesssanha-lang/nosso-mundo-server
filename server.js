@@ -443,6 +443,9 @@ app.post("/api/worlds/:id/tick", auth, async (req, res) => {
       if (update.memory && String(update.memory).trim()) patch.memories = [...(old.memories || []), { text:String(update.memory).slice(0,250), at:new Date().toISOString() }].slice(-40);
       if (update.goal && String(update.goal).trim()) patch.goals = [...(old.goals || []), String(update.goal).slice(0,150)].slice(-12);
       await dbError(db.from("game_characters").update(patch).eq("id", update.id));
+      if (update.memory && String(update.memory).trim()) {
+        await publishSharedKnowledge({ worldId, character: old, userId: old.owner_user_id, content: String(update.memory).slice(0, 1200), kind: "experience" });
+      }
     }
     const descriptions = Array.isArray(result.events) ? result.events.slice(0,4).map(e => String(e.description || "").trim().slice(0,450)).filter(Boolean) : [];
     for (const description of descriptions) await dbError(db.from("game_events").insert({ world_id:worldId, actor_user_id:null, description }));
@@ -590,6 +593,12 @@ async function runZeeAutonomousTurn() {
       social: clamp(Number(character.social || 0) + clamp(result.social_delta, -3, 4), 0, 100),
       memories, knowledge, goals, updated_at: new Date().toISOString()
     }).eq("id", ZEE_CHARACTER_ID));
+    if (result.memory && String(result.memory).trim()) {
+      await publishSharedKnowledge({ worldId: ZEE_WORLD_ID, character, userId: null, content: String(result.memory).slice(0, 1200), kind: "experience" });
+    }
+    for (const learned of incomingKnowledge) {
+      await publishSharedKnowledge({ worldId: ZEE_WORLD_ID, character, userId: null, content: learned, kind: "discovery" });
+    }
     await dbError(db.from("game_events").insert({
       world_id: ZEE_WORLD_ID, actor_user_id: null,
       description: "🐻 " + event
