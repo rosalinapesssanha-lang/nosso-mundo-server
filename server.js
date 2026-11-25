@@ -19,6 +19,8 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-2.5-flash")
+  .split(",").map(x => x.trim()).filter(x => x && x !== GEMINI_MODEL);
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !JWT_SECRET) {
   console.error("Configure SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY e JWT_SECRET no Render.");
@@ -60,43 +62,48 @@ async function isMember(worldId, userId) {
 }
 async function gemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("A chave GEMINI_API_KEY não está configurada no Render.");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const models = [GEMINI_MODEL, ...GEMINI_FALLBACK_MODELS];
   const payload = {
     systemInstruction: { parts: [{ text: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Nunca diga que executou ações que não foram incluídas no JSON. Responda somente JSON válido, sem markdown." }] },
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.85, responseMimeType: "application/json" }
   };
-
-  // Retenta erros temporários de sobrecarga/limite da API, sem duplicar gravações no banco.
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(25000)
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = data?.error?.message || `Gemini retornou HTTP ${response.status}`;
-        const error = new Error(message.slice(0, 400));
-        if (![429, 500, 502, 503, 504].includes(response.status)) throw error;
+  const temporaryStatuses = [408, 429, 500, 502, 503, 504];
+
+  // Tenta o modelo principal e, se ele estiver congestionado, troca automaticamente.
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(25000)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = data?.error?.message || `Gemini retornou HTTP ${response.status}`;
+          const error = new Error(`Modelo ${model}: ${message.slice(0, 300)}`);
+          if (!temporaryStatuses.includes(response.status)) throw error;
+          lastError = error;
+        } else {
+          const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+          if (!raw) throw new Error(`O modelo ${model} não retornou conteúdo.`);
+          return JSON.parse(raw);
+        }
+      } catch (error) {
         lastError = error;
-      } else {
-        const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-        if (!raw) throw new Error("O Gemini não retornou conteúdo.");
-        return JSON.parse(raw);
+        const transient = error.name === "TimeoutError" ||
+          /fetch failed|network|HTTP 408|HTTP 429|HTTP 500|HTTP 502|HTTP 503|HTTP 504|high demand|overload|temporarily unavailable/i.test(error.message || "");
+        if (!transient) throw error;
       }
-    } catch (error) {
-      lastError = error;
-      if (error.name !== "TimeoutError" && !/fetch failed|network/i.test(error.message || "")) {
-        if (!/HTTP 429|HTTP 500|HTTP 502|HTTP 503|HTTP 504|high demand|overload|temporarily unavailable/i.test(error.message || "")) throw error;
-      }
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1200));
     }
-    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1800 * (attempt + 1)));
+    console.warn(`Gemini indisponível no modelo ${model}; tentando o próximo modelo.`);
   }
-  throw new Error(`O Gemini está temporariamente sobrecarregado após 3 tentativas. Tente novamente em alguns minutos. Detalhe: ${lastError?.message || "sem resposta"}`);
+  throw new Error(`Todos os modelos Gemini configurados estão temporariamente indisponíveis. Modelos tentados: ${models.join(", ")}. Detalhe: ${lastError?.message || "sem resposta"}`);
 }
 
 app.get("/", (_req, res) => res.json({
