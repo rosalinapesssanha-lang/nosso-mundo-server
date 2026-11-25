@@ -283,7 +283,6 @@ async function processThoughtQueue() {
       const claimedRows = await dbError(db.rpc("claim_next_game_thought"));
       const item = Array.isArray(claimedRows) ? claimedRows[0] : claimedRows;
       if (!item) break;
-      await updateThought(item.id, { progress: 18, stage: "Lendo o ensinamento" });
       try {
         await updateThought(item.id, { progress: 18, stage: "Lendo o ensinamento" });
         const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", item.user_id).single());
