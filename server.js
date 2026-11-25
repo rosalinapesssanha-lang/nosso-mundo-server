@@ -406,8 +406,20 @@ app.get("/api/worlds/:id", auth, async (req, res) => {
       const a=ids[i], b=ids[j];
       const { data: found, error: findError } = await db.from("game_character_encounters").select("id").eq("world_id",req.params.id).eq("character_a_id",a).eq("character_b_id",b).maybeSingle();
       if (findError) throw findError;
-      if (found) await dbError(db.from("game_character_encounters").update({last_met_at:new Date().toISOString()}).eq("id",found.id));
-      else await dbError(db.from("game_character_encounters").insert({world_id:req.params.id,character_a_id:a,character_b_id:b}));
+      if (found) {
+        await dbError(db.from("game_character_encounters").update({last_met_at:new Date().toISOString()}).eq("id",found.id));
+      } else {
+        await dbError(db.from("game_character_encounters").insert({world_id:req.params.id,character_a_id:a,character_b_id:b}));
+        const pair = await dbError(db.from("game_characters").select("id,name,memories").in("id",[a,b]));
+        const names = new Map(pair.map(c=>[c.id,c.name]));
+        const now = new Date().toISOString();
+        for (const c of pair) {
+          const other = c.id===a ? b : a;
+          const note = "Conheceu "+(names.get(other)||"outro habitante")+" no habitat "+world.name+".";
+          const memories = [...(c.memories||[]),{text:note,at:now}].slice(-40);
+          await dbError(db.from("game_characters").update({memories,updated_at:now}).eq("id",c.id));
+        }
+      }
     }
     const { data: habitat } = await db.from("game_world_state").select("*").eq("world_id", req.params.id).maybeSingle();
     const home = await dbError(db.from("game_worlds").select("id,name,invite_code").eq("id",own.home_world_id).maybeSingle());
