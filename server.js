@@ -177,8 +177,12 @@ async function gemini(prompt) {
   const failures = [];
   const now = Date.now();
   const ready = providers.filter(provider => (aiProviderCooldowns.get(provider) || 0) <= now);
-  const candidates = ready.length ? ready : providers;
-  for (const provider of candidates) {
+  if (!ready.length) {
+    const nextRetry = Math.min(...providers.map(provider => aiProviderCooldowns.get(provider) || now));
+    const seconds = Math.max(1, Math.ceil((nextRetry - now) / 1000));
+    throw new Error("Todos os provedores configurados estão temporariamente em pausa. Nova tentativa em aproximadamente " + seconds + "s.");
+  }
+  for (const provider of ready) {
     try {
       let result;
       if (provider === "groq") {
