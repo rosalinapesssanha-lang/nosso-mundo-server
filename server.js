@@ -419,9 +419,62 @@ app.get("/api/worlds/:id/thoughts", auth, async (req, res) => {
   }
 });
 
+
+// Agente autônomo do Bosque do Zé. Atua apenas no habitat/personagem fixados aqui.
+const ZEE_WORLD_ID = "ead81748-bd08-47cb-a46d-23a58f8ad7ab";
+const ZEE_CHARACTER_ID = "cff93702-861e-449c-8bb1-3dd0d57fb06e";
+let zeeTurnRunning = false;
+let zeeLastTurnAt = 0;
+
+async function runZeeAutonomousTurn() {
+  if (zeeTurnRunning || Date.now() - zeeLastTurnAt < 10 * 60 * 1000) return;
+  zeeTurnRunning = true;
+  zeeLastTurnAt = Date.now();
+  try {
+    const [character, state] = await Promise.all([
+      dbError(db.from("game_characters").select("*").eq("id", ZEE_CHARACTER_ID).single()),
+      dbError(db.from("game_world_state").select("*").eq("world_id", ZEE_WORLD_ID).maybeSingle())
+    ]);
+    const environment = state?.environment || { biome: "bosque temperado com riacho e clareira", season: "primavera", weather: "ensolarado", time: "manhã", resources: "abundantes" };
+    const prompt = `Você controla o personagem virtual Zé em seu habitat. Faça UMA pequena decisão autônoma coerente com sua personalidade, necessidades, objetivos, ambiente e memórias. Ele é um urso curioso, observador, brincalhão e independente. Deve explorar com prudência, procurar água/alimento, descansar quando cansado e respeitar o ecossistema. Não invente outros habitantes. Não alegue que encontrou/consumiu recursos ou mudou algo que não esteja descrito na ação. Conhecimentos atuais: ${JSON.stringify(character.knowledge || [])}. Memórias recentes: ${JSON.stringify((character.memories || []).slice(-10))}. Objetivos: ${JSON.stringify(character.goals || [])}. Estado: ${JSON.stringify({ mood: character.mood, energy: character.energy, social: character.social, position: character.position, environment })}. Retorne somente JSON: {"action":"ação pequena e concreta, até 220 caracteres","event":"narração curta em terceira pessoa, até 300 caracteres","mood":"humor curto","energy_delta":número de -12 a 8,"social_delta":número de -3 a 4,"memory":"lembrança curta, até 220 caracteres","knowledge":["zero ou um aprendizado novo realmente sustentado pela experiência"],"goal":"objetivo atual curto ou string vazia"}. Não crie conhecimento factual sem evidência; se nada aprendeu, use array vazio.`;
+    const result = await gemini(prompt);
+    const clamp = (n, min, max) => Math.max(min, Math.min(max, Number.isFinite(Number(n)) ? Number(n) : 0));
+    const action = String(result.action || "Observou o bosque em silêncio.").slice(0, 220);
+    const event = String(result.event || ("Zé " + action)).slice(0, 300);
+    const memories = [...(character.memories || []), {
+      text: String(result.memory || action).slice(0, 220),
+      at: new Date().toISOString()
+    }].slice(-40);
+    const incomingKnowledge = Array.isArray(result.knowledge)
+      ? result.knowledge.map(x => String(x).trim().slice(0, 220)).filter(Boolean).slice(0, 1) : [];
+    const knowledge = [...(character.knowledge || []), ...incomingKnowledge].slice(-60);
+    const goals = result.goal && String(result.goal).trim()
+      ? [...(character.goals || []), String(result.goal).slice(0, 140)].slice(-12)
+      : (character.goals || []).slice(-12);
+    await dbError(db.from("game_characters").update({
+      mood: String(result.mood || character.mood || "curioso").slice(0, 40),
+      energy: clamp(Number(character.energy || 0) + clamp(result.energy_delta, -12, 8), 0, 100),
+      social: clamp(Number(character.social || 0) + clamp(result.social_delta, -3, 4), 0, 100),
+      memories, knowledge, goals, updated_at: new Date().toISOString()
+    }).eq("id", ZEE_CHARACTER_ID));
+    await dbError(db.from("game_events").insert({
+      world_id: ZEE_WORLD_ID, actor_user_id: null,
+      description: "🐻 " + event
+    }));
+    console.log("Turno autônomo do Zé concluído:", action);
+  } catch (error) {
+    console.error("Turno autônomo do Zé falhou:", error.message);
+  } finally {
+    zeeTurnRunning = false;
+  }
+}
+
 app.listen(PORT, async () => {
   console.log(`Nosso Mundo API rodando na porta ${PORT}`);
   // A função SQL reivindica itens com bloqueio atômico; itens abandonados
   // são retomados automaticamente quando a concessão de 2 minutos expira.
   processThoughtQueue();
+  // Primeira ação após a inicialização; depois, uma ação a cada 15 minutos.
+  setTimeout(runZeeAutonomousTurn, 45000);
+  setInterval(runZeeAutonomousTurn, 15 * 60 * 1000);
 });
