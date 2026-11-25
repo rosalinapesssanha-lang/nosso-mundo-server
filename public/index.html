@@ -45,7 +45,7 @@ async function boot(){showGame();const profile=await api("/api/me");me=profile.c
 async function loadWorld(){if(!worldId)return;worldData=await api("/api/worlds/"+worldId);me=worldData.characters.find(c=>c.owner_user_id===worldData.characters.find(x=>x.home_world_id===me.home_world_id)?.owner_user_id)||me;const own=worldData.characters.find(c=>c.id===me.id);if(own)me=own;
 say("worldName","🌳 "+worldData.world.name);say("worldMeta",(worldData.world.id===me.home_world_id?"Seu habitat de origem":"Habitat visitado")+" · código "+worldData.world.invite_code);
 say("myName",me.name);say("myEmoji",emojis[me.animal]||"🐾");say("myMood",me.mood||"Curioso");say("energyText",(me.energy||0)+"%");$("energyBar").style.width=Math.max(0,Math.min(100,me.energy||0))+"%";say("socialText",(me.social||0)+"%");$("socialBar").style.width=Math.max(0,Math.min(100,me.social||0))+"%";say("homeCode","Seu lar: "+(worldData.home?.name||"Habitat original")+" · código "+(worldData.home?.invite_code||"—"));
-$("inhabitants").innerHTML=worldData.characters.map(c=>'<div class="inhabitant"><span class="face">'+(emojis[c.animal]||"🐾")+'</span><div><b>'+esc(c.name)+'</b><small>'+esc(c.mood||"por aqui")+(c.id===me.id?" · você":"")+'</small></div></div>').join("")||'<span class="tiny">Ainda não há habitantes.</span>';
+$("inhabitants").innerHTML=worldData.characters.map(c=>'<div class="inhabitant"><span class="face">'+(emojis[c.animal]||"🐾")+'</span><div><b>'+esc(c.name)+'</b><small>'+esc(c.current_action||c.mood||"por aqui")+(c.id===me.id?" · você":"")+'</small></div></div>').join("")||'<span class="tiny">Ainda não há habitantes.</span>';
 if(me.position&&Number(me.position.x)>100){cam.x=Number(me.position.x);cam.y=Number(me.position.y)}draw();
 }
 function resizeCanvas(){const c=$("worldCanvas");if(!c||$("game").classList.contains("hidden"))return;const r=c.getBoundingClientRect();const dpr=Math.min(devicePixelRatio||1,2);c.width=Math.max(1,Math.floor(r.width*dpr));c.height=Math.max(1,Math.floor(r.height*dpr));view={w:r.width,h:r.height};draw()}
@@ -60,9 +60,25 @@ ctx.fillStyle="#579fa1";ctx.beginPath();ctx.ellipse(1220,760,220,115,-.22,0,Math
 // pedras e canteiros
 for(const [x,y] of [[280,260],[520,760],[930,250],[1430,780],[770,850]]){ctx.fillStyle="#8b9b78";ctx.beginPath();ctx.ellipse(x,y,45,26,.4,0,Math.PI*2);ctx.fill()}
 for(let i=0;i<42;i++){const x=75+(i*173)%1450,y=70+(i*97)%850;if((x>1000&&y>600)||(x>100&&x<1450&&y>420&&y<560))continue;ctx.fillStyle="#315f3d";ctx.beginPath();ctx.arc(x,y,24,0,Math.PI*2);ctx.fill();ctx.fillStyle="#397b45";ctx.beginPath();ctx.arc(x-7,y-8,19,0,Math.PI*2);ctx.fill();ctx.fillStyle="#6a4a32";ctx.fillRect(x-5,y+12,10,22)}
+// recursos utilizáveis do habitat
+const objects = worldData.habitat?.environment?.objects || [];
+for (const o of objects) {
+  const x=Number(o.x), y=Number(o.y);
+  if (o.type==="food") {
+    ctx.fillStyle="#315f36";ctx.beginPath();ctx.arc(x,y,23,0,Math.PI*2);ctx.fill();
+    for(let k=0;k<5;k++){ctx.fillStyle="#d94d65";ctx.beginPath();ctx.arc(x-12+(k%3)*12,y-7+Math.floor(k/3)*13,5,0,Math.PI*2);ctx.fill()}
+    ctx.fillStyle="#f4f0d8";ctx.font="bold 13px system-ui";ctx.textAlign="center";ctx.fillText("Frutas "+Math.max(0,Number(o.amount)||0),x,y+39);
+  } else if (o.type==="shelter") {
+    ctx.fillStyle="#78563a";ctx.fillRect(x-30,y-17,60,38);ctx.fillStyle="#b77a45";ctx.beginPath();ctx.moveTo(x-38,y-15);ctx.lineTo(x,y-45);ctx.lineTo(x+38,y-15);ctx.closePath();ctx.fill();
+    ctx.fillStyle="#f4f0d8";ctx.font="bold 13px system-ui";ctx.fillText("Abrigo",x,y+34);
+  } else if (o.type==="rest") {
+    ctx.fillStyle="#89978a";ctx.beginPath();ctx.ellipse(x,y,34,20,-.2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="#f4f0d8";ctx.font="bold 13px system-ui";ctx.fillText("Pedras",x,y+34);
+  }
+}
 // bordas do mundo
 ctx.strokeStyle="#d4c58c";ctx.lineWidth=12;ctx.strokeRect(12,12,1576,976);
-for(const c0 of worldData.characters){let p=c0.position||{};let x=Number(p.x),y=Number(p.y);if(x<100||y<100){x=600+(worldData.characters.indexOf(c0)%4)*90;y=390+(worldData.characters.indexOf(c0)%3)*80}ctx.fillStyle="#1c3829";ctx.beginPath();ctx.ellipse(x,y+20,29,10,0,0,Math.PI*2);ctx.fill();ctx.font="38px system-ui";ctx.textAlign="center";ctx.fillText(emojis[c0.animal]||"🐾",x,y+8);ctx.fillStyle="#14271d";ctx.font="bold 13px system-ui";ctx.fillText(c0.name,x,y+43);if(c0.id===me.id){ctx.strokeStyle="#f6d98c";ctx.lineWidth=3;ctx.beginPath();ctx.arc(x,y-5,29,0,Math.PI*2);ctx.stroke()}}
+for(const c0 of worldData.characters){let p=c0.position||{};let x=Number(p.x),y=Number(p.y);if(x<100||y<100){x=600+(worldData.characters.indexOf(c0)%4)*90;y=390+(worldData.characters.indexOf(c0)%3)*80}ctx.fillStyle="#1c3829";ctx.beginPath();ctx.ellipse(x,y+20,29,10,0,0,Math.PI*2);ctx.fill();ctx.font="38px system-ui";ctx.textAlign="center";ctx.fillText(emojis[c0.animal]||"🐾",x,y+8);ctx.fillStyle="#14271d";ctx.font="bold 13px system-ui";ctx.fillText(c0.name,x,y+43);ctx.fillStyle="#f7f1d9";ctx.font="11px system-ui";ctx.fillText(String(c0.current_action||"").slice(0,28),x,y+58);if(c0.id===me.id){ctx.strokeStyle="#f6d98c";ctx.lineWidth=3;ctx.beginPath();ctx.arc(x,y-5,29,0,Math.PI*2);ctx.stroke()}}
 ctx.restore()}
 const canvas=$("worldCanvas");canvas.addEventListener("pointerdown",e=>{if(!worldData)return;dragging=true;dragStart={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y};canvas.setPointerCapture(e.pointerId)});canvas.addEventListener("pointermove",e=>{if(!dragging||!dragStart)return;const scale=Math.min(view.w/760,view.h/440);cam.x=Math.max(view.w/(2*scale),Math.min(1600-view.w/(2*scale),dragStart.cx-(e.clientX-dragStart.x)/scale));cam.y=Math.max(view.h/(2*scale),Math.min(1000-view.h/(2*scale),dragStart.cy-(e.clientY-dragStart.y)/scale));draw()});canvas.addEventListener("pointerup",()=>{dragging=false;dragStart=null});canvas.addEventListener("pointercancel",()=>{dragging=false;dragStart=null});
 function openModal(title,html){say("modalTitle",title);$("modalBody").innerHTML=html;$("modal").classList.remove("hidden")}
