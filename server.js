@@ -61,55 +61,121 @@ async function isMember(worldId, userId) {
   return dbError(db.from("game_world_members").select("world_id")
     .eq("world_id", worldId).eq("user_id", userId).maybeSingle());
 }
-async function gemini(prompt) {
-  if (!GEMINI_API_KEY) throw new Error("A chave GEMINI_API_KEY não está configurada no Render.");
-  const models = [...new Set([GEMINI_MODEL, ...GEMINI_FALLBACK_MODELS])];
-  const payload = {
-    systemInstruction: { parts: [{ text: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Nunca diga que executou ações que não foram incluídas no JSON. Responda somente JSON válido, sem markdown." }] },
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.85, responseMimeType: "application/json" }
-  };
-  let lastError = null;
-  const temporaryStatuses = [408, 429, 500, 502, 503, 504];
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const AI_PROVIDER_ORDER = (process.env.AI_PROVIDER_ORDER || "groq,gemini,openai")
+  .split(",").map(x => x.trim().toLowerCase()).filter(x => ["groq", "gemini", "openai"].includes(x));
 
-  // Tenta o modelo principal e, se ele estiver congestionado, troca automaticamente.
-  for (const model of models) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(25000)
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          const message = data?.error?.message || `Gemini retornou HTTP ${response.status}`;
-          const error = new Error(`Modelo ${model}: ${message.slice(0, 300)}`);
-          if (!temporaryStatuses.includes(response.status)) throw error;
-          lastError = error;
-        } else {
-          const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-          if (!raw) throw new Error(`O modelo ${model} não retornou conteúdo.`);
-          return JSON.parse(raw);
-        }
-      } catch (error) {
-        lastError = error;
-        const transient = error.name === "TimeoutError" ||
-          /fetch failed|network|HTTP 408|HTTP 429|HTTP 500|HTTP 502|HTTP 503|HTTP 504|high demand|overload|temporarily unavailable/i.test(error.message || "");
-        if (!transient) throw error;
-      }
-      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, [3000, 8000][attempt]));
-    }
-    console.warn(`Gemini indisponível no modelo ${model}; tentando o próximo modelo.`);
+function availableAIProviders() {
+  return AI_PROVIDER_ORDER.filter(provider =>
+    (provider === "groq" && GROQ_API_KEY) ||
+    (provider === "openai" && OPENAI_API_KEY) ||
+    (provider === "gemini" && GEMINI_API_KEY)
+  );
+}
+
+function extractJson(text) {
+  const clean = String(text || "").trim()
+    .replace(new RegExp("^" + String.fromCharCode(96).repeat(3) + "(?:json)?\\\\s*", "i"), "")
+    .replace(new RegExp("\\\\s*" + String.fromCharCode(96).repeat(3) + "$"), "");
+  try { return JSON.parse(clean); } catch {}
+  const first = clean.indexOf("{");
+  const last = clean.lastIndexOf("}");
+  if (first >= 0 && last > first) return JSON.parse(clean.slice(first, last + 1));
+  throw new Error("A IA retornou uma resposta que não é JSON válido.");
+}
+
+async function callOpenAICompatible({ provider, key, model, prompt, baseUrl, timeoutMs = 18000 }) {
+  const response = await fetch(baseUrl + "/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Responda somente JSON válido, sem markdown." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.65,
+      response_format: { type: "json_object" }
+    }),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(provider + " (" + model + "): " +
+      String(data?.error?.message || data?.message || ("HTTP " + response.status)).slice(0, 260));
+    error.status = response.status;
+    throw error;
   }
-  throw new Error(`O modelo Gemini ${GEMINI_MODEL} continua indisponível após novas tentativas. ${GEMINI_FALLBACK_MODELS.length ? "Modelos alternativos configurados: " + GEMINI_FALLBACK_MODELS.join(", ") + ". " : "Nenhum modelo alternativo foi configurado, para evitar usar IDs descontinuados. "}Detalhe: ${lastError?.message || "sem resposta"}`);
+  const output = data?.choices?.[0]?.message?.content;
+  if (!output) throw new Error(provider + " não retornou conteúdo.");
+  return extractJson(output);
+}
+
+async function callGemini(prompt) {
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" +
+    encodeURIComponent(GEMINI_MODEL) + ":generateContent?key=" + encodeURIComponent(GEMINI_API_KEY);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Responda somente JSON válido, sem markdown." }] },
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.65, responseMimeType: "application/json" }
+    }),
+    signal: AbortSignal.timeout(18000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error("Gemini (" + GEMINI_MODEL + "): " +
+      String(data?.error?.message || ("HTTP " + response.status)).slice(0, 260));
+    error.status = response.status;
+    throw error;
+  }
+  const output = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+  if (!output) throw new Error("Gemini não retornou conteúdo.");
+  return extractJson(output);
+}
+
+// Camada única para conversa, ensino, fila de pensamentos, simulação e agente autônomo.
+async function gemini(prompt) {
+  const providers = availableAIProviders();
+  if (!providers.length) {
+    throw new Error("Nenhuma IA configurada. Adicione GROQ_API_KEY, GEMINI_API_KEY ou OPENAI_API_KEY no Render.");
+  }
+  const failures = [];
+  for (const provider of providers) {
+    try {
+      let result;
+      if (provider === "groq") {
+        result = await callOpenAICompatible({
+          provider: "Groq", key: GROQ_API_KEY, model: GROQ_MODEL, prompt,
+          baseUrl: "https://api.groq.com/openai/v1"
+        });
+      } else if (provider === "openai") {
+        result = await callOpenAICompatible({
+          provider: "OpenAI", key: OPENAI_API_KEY, model: OPENAI_MODEL, prompt,
+          baseUrl: "https://api.openai.com/v1"
+        });
+      } else {
+        result = await callGemini(prompt);
+      }
+      console.log("IA respondeu usando:", provider);
+      return result;
+    } catch (error) {
+      failures.push(String(error.message || error).slice(0, 320));
+      console.warn("Provedor de IA falhou; tentando o próximo:", provider, failures[failures.length - 1]);
+    }
+  }
+  throw new Error("Todos os provedores de IA falharam: " + failures.join(" | "));
 }
 
 app.get("/", (_req, res) => res.json({
   name: "Nosso Mundo API", status: "online",
-  ai: GEMINI_API_KEY ? "configured" : "missing_key"
+  ai: { status: availableAIProviders().length ? "configured" : "missing_key",
+    providers: availableAIProviders(), preferred: availableAIProviders()[0] || null }
 }));
 
 app.post("/api/register", async (req, res) => {
