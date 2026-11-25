@@ -365,4 +365,13 @@ app.get("/api/worlds/:id/thoughts", auth, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Nosso Mundo API rodando na porta ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`Nosso Mundo API rodando na porta ${PORT}`);
+  // Se o processo reiniciou durante uma chamada, devolve o item à fila.
+  const { error } = await db.from("game_thought_queue").update({
+    status: "queued", progress: 0, stage: "Retomado após reinício", started_at: null,
+    updated_at: new Date().toISOString()
+  }).eq("status", "processing");
+  if (error) console.error("queue recovery:", error.message);
+  else processThoughtQueue();
+});
