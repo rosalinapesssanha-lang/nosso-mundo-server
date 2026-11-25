@@ -139,43 +139,87 @@ async function callGemini(prompt) {
   return extractJson(output);
 }
 
-// Camada única para conversa, ensino, fila de pensamentos, simulação e agente autônomo.
+// Camada única de IA com circuit breaker: provedores com erro de cota/chave
+// ficam temporariamente em pausa para evitar chamadas inúteis e acelerar o fallback.
+const aiProviderCooldowns = new Map();
+const aiProviderStats = new Map();
+
+function providerCooldownMs(error) {
+  const status = Number(error && error.status);
+  const message = String(error && error.message || "").toLowerCase();
+  if (status === 429 || /quota|rate.?limit|resource_exhausted|too many requests/.test(message)) return 5 * 60 * 1000;
+  if (status === 401 || status === 403 || /invalid api key|unauthorized|permission denied/.test(message)) return 15 * 60 * 1000;
+  if (status === 404 || /model.*not found|not found.*model|unsupported model/.test(message)) return 30 * 60 * 1000;
+  return 20 * 1000;
+}
+
+function getAIStatus() {
+  const now = Date.now();
+  return {
+    status: availableAIProviders().length ? "configured" : "missing_key",
+    preferred: availableAIProviders().find(p => (aiProviderCooldowns.get(p) || 0) <= now) || null,
+    providers: AI_PROVIDER_ORDER.map(provider => ({
+      name: provider,
+      configured: availableAIProviders().includes(provider),
+      coolingDown: (aiProviderCooldowns.get(provider) || 0) > now,
+      retryInSeconds: Math.max(0, Math.ceil(((aiProviderCooldowns.get(provider) || 0) - now) / 1000)),
+      successes: (aiProviderStats.get(provider) || {}).successes || 0,
+      failures: (aiProviderStats.get(provider) || {}).failures || 0
+    }))
+  };
+}
+
 async function gemini(prompt) {
   const providers = availableAIProviders();
   if (!providers.length) {
     throw new Error("Nenhuma IA configurada. Adicione GROQ_API_KEY, GEMINI_API_KEY ou OPENAI_API_KEY no Render.");
   }
   const failures = [];
-  for (const provider of providers) {
+  const now = Date.now();
+  const ready = providers.filter(provider => (aiProviderCooldowns.get(provider) || 0) <= now);
+  const candidates = ready.length ? ready : providers;
+  for (const provider of candidates) {
     try {
       let result;
       if (provider === "groq") {
         result = await callOpenAICompatible({
           provider: "Groq", key: GROQ_API_KEY, model: GROQ_MODEL, prompt,
-          baseUrl: "https://api.groq.com/openai/v1"
+          baseUrl: "https://api.groq.com/openai/v1", timeoutMs: 12000
         });
       } else if (provider === "openai") {
         result = await callOpenAICompatible({
           provider: "OpenAI", key: OPENAI_API_KEY, model: OPENAI_MODEL, prompt,
-          baseUrl: "https://api.openai.com/v1"
+          baseUrl: "https://api.openai.com/v1", timeoutMs: 15000
         });
       } else {
         result = await callGemini(prompt);
       }
+      aiProviderCooldowns.delete(provider);
+      const stats = aiProviderStats.get(provider) || { successes: 0, failures: 0 };
+      stats.successes += 1;
+      aiProviderStats.set(provider, stats);
       console.log("IA respondeu usando:", provider);
       return result;
     } catch (error) {
-      failures.push(String(error.message || error).slice(0, 320));
-      console.warn("Provedor de IA falhou; tentando o próximo:", provider, failures[failures.length - 1]);
+      const cooldown = providerCooldownMs(error);
+      aiProviderCooldowns.set(provider, Date.now() + cooldown);
+      const stats = aiProviderStats.get(provider) || { successes: 0, failures: 0 };
+      stats.failures += 1;
+      aiProviderStats.set(provider, stats);
+      const detail = String(error.message || error).slice(0, 280);
+      failures.push(provider + ": " + detail);
+      console.warn("Provedor em pausa por " + Math.ceil(cooldown / 1000) + "s:", provider, detail);
     }
   }
-  throw new Error("Todos os provedores de IA falharam: " + failures.join(" | "));
+  throw new Error("Nenhum provedor de IA respondeu. " + failures.join(" | "));
 }
 
 app.get("/", (_req, res) => res.json({
-  name: "Nosso Mundo API", status: "online",
-  ai: { status: availableAIProviders().length ? "configured" : "missing_key",
-    providers: availableAIProviders(), preferred: availableAIProviders()[0] || null }
+  name: "Nosso Mundo API", status: "online", ai: getAIStatus()
+}));
+app.get("/healthz", (_req, res) => res.json({
+  ok: true, service: "nosso-mundo-server", ai: getAIStatus(),
+  timestamp: new Date().toISOString()
 }));
 
 app.post("/api/register", async (req, res) => {
