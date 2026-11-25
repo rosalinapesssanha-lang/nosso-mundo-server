@@ -264,4 +264,105 @@ app.post("/api/worlds/:id/tick", auth, async (req, res) => {
   }
 });
 
+
+
+// Fila persistente de pensamentos: processa um item por vez neste servidor.
+let thoughtWorkerRunning = false;
+
+async function updateThought(id, patch) {
+  return dbError(db.from("game_thought_queue").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id));
+}
+
+async function processThoughtQueue() {
+  if (thoughtWorkerRunning) return;
+  thoughtWorkerRunning = true;
+  try {
+    while (true) {
+      const item = await dbError(db.from("game_thought_queue").select("*")
+        .eq("status", "queued").order("created_at", { ascending: true }).limit(1).maybeSingle());
+      if (!item) break;
+      const claimed = await dbError(db.from("game_thought_queue").update({
+        status: "processing", progress: 8, stage: "Preparando o pensamento",
+        started_at: new Date().toISOString(), updated_at: new Date().toISOString()
+      }).eq("id", item.id).eq("status", "queued").select("id").maybeSingle());
+      if (!claimed) continue;
+      try {
+        await updateThought(item.id, { progress: 18, stage: "Lendo o ensinamento" });
+        const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", item.user_id).single());
+        await updateThought(item.id, { progress: 32, stage: "Analisando com a inteligência artificial" });
+        const prompt = "Um humano está ensinando algo ao personagem. Personagem: " +
+          JSON.stringify({ name: character.name, animal: character.animal, personality: character.personality,
+            knowledge: character.knowledge || [], memories: character.memories || [] }) +
+          ". Ensinamento: " + JSON.stringify(item.input_text) +
+          ". Retorne JSON com campos: understood (string explicando o que entendeu com linguagem simples e natural), knowledge (array com 1 a 3 aprendizados curtos que realmente podem ser usados depois), memory (string curta registrando a experiência). Não invente fatos além do ensinamento.";
+        const result = await gemini(prompt);
+        await updateThought(item.id, { progress: 88, stage: "Guardando o que foi aprendido" });
+        const knowledge = [...(character.knowledge || []), ...(Array.isArray(result.knowledge) ? result.knowledge.slice(0, 3) : [item.input_text])].slice(-60);
+        const memories = [...(character.memories || []), {
+          text: String(result.memory || ("Aprendeu: " + item.input_text)).slice(0, 300),
+          at: new Date().toISOString()
+        }].slice(-40);
+        await dbError(db.from("game_characters").update({ knowledge, memories, updated_at: new Date().toISOString() }).eq("id", character.id));
+        await dbError(db.from("game_events").insert({
+          world_id: item.world_id, actor_user_id: item.user_id,
+          description: character.name + " aprendeu: " + String(result.understood || item.input_text).slice(0, 350)
+        }));
+        await updateThought(item.id, {
+          status: "completed", progress: 100, stage: "Concluído",
+          result: { understood: result.understood || "Aprendi algo novo!", knowledge },
+          finished_at: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error("thought queue item:", item.id, error.message);
+        await updateThought(item.id, {
+          status: "failed", progress: 100, stage: "Não foi possível concluir",
+          error_message: String(error.message || "Erro desconhecido").slice(0, 500),
+          finished_at: new Date().toISOString()
+        });
+      }
+    }
+  } catch (error) {
+    console.error("thought queue worker:", error.message);
+  } finally {
+    thoughtWorkerRunning = false;
+    db.from("game_thought_queue").select("id").eq("status", "queued").limit(1)
+      .then(({ data }) => { if (data && data.length) processThoughtQueue(); });
+  }
+}
+
+app.post("/api/worlds/:id/thoughts", auth, async (req, res) => {
+  try {
+    const worldId = req.params.id;
+    if (!await isMember(worldId, req.user.sub)) return res.status(403).json({ error: "Você não faz parte deste mundo." });
+    const input = String(req.body.text || "").trim().slice(0, 1200);
+    if (input.length < 2) return res.status(400).json({ error: "Escreva o que deseja ensinar." });
+    const { data: active, error: activeError } = await db.from("game_thought_queue")
+      .select("id").eq("world_id", worldId).in("status", ["queued", "processing"]).limit(12);
+    if (activeError) throw activeError;
+    if ((active || []).length >= 12) return res.status(429).json({ error: "A fila está cheia. Aguarde alguns pensamentos terminarem." });
+    const thought = await dbError(db.from("game_thought_queue").insert({
+      world_id: worldId, user_id: req.user.sub, input_text: input,
+      status: "queued", progress: 0, stage: "Na fila"
+    }).select("id, status, progress, stage, created_at").single());
+    processThoughtQueue();
+    res.status(202).json({ thought });
+  } catch (error) {
+    console.error("enqueue thought:", error.message);
+    res.status(500).json({ error: "Não foi possível adicionar à fila. Confira se a migração da fila foi executada." });
+  }
+});
+
+app.get("/api/worlds/:id/thoughts", auth, async (req, res) => {
+  try {
+    if (!await isMember(req.params.id, req.user.sub)) return res.status(403).json({ error: "Você não faz parte deste mundo." });
+    const thoughts = await dbError(db.from("game_thought_queue").select(
+      "id, user_id, input_text, status, progress, stage, result, error_message, created_at, started_at, finished_at"
+    ).eq("world_id", req.params.id).order("created_at", { ascending: false }).limit(25));
+    res.json({ thoughts });
+  } catch (error) {
+    console.error("get thoughts:", error.message);
+    res.status(500).json({ error: "Não foi possível carregar a fila de pensamentos." });
+  }
+});
+
 app.listen(PORT, () => console.log(`Nosso Mundo API rodando na porta ${PORT}`));
