@@ -324,9 +324,28 @@ app.post("/api/change-pin", auth, async (req, res) => {
 
 app.get("/api/me", auth, async (req, res) => {
   try {
-    const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", req.user.sub).maybeSingle());
+    let character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", req.user.sub).maybeSingle());
+    if (!character) return res.status(404).json({error:"Personagem não encontrado."});
+    if (!character.home_world_id) {
+      const invite_code = crypto.randomBytes(5).toString("hex").toUpperCase();
+      const home = await dbError(db.from("game_worlds").insert({name:"Habitat de "+req.user.username,invite_code,created_by:req.user.sub}).select("id,name,invite_code").single());
+      await dbError(db.from("game_world_members").upsert({world_id:home.id,user_id:req.user.sub},{onConflict:"world_id,user_id"}));
+      await dbError(db.from("game_characters").update({home_world_id:home.id,current_world_id:home.id,position:{x:600,y:400}}).eq("id",character.id));
+      character.home_world_id=home.id; character.current_world_id=home.id; character.position={x:600,y:400};
+    }
     res.json({ user: { id: req.user.sub, username: req.user.username }, character });
-  } catch (error) { res.status(500).json({ error: "Não foi possível carregar o perfil." }); }
+  } catch (error) { console.error("me:",error.message); res.status(500).json({ error: "Não foi possível carregar o perfil." }); }
+});
+
+app.post("/api/characters/move", auth, async (req,res) => {
+  try {
+    const character = await getMyCharacter(req.user.sub);
+    if (!character.current_world_id) return res.status(400).json({error:"Seu personagem ainda não está em um habitat."});
+    const x=Math.max(48,Math.min(1552,Number(req.body.x)||600));
+    const y=Math.max(48,Math.min(952,Number(req.body.y)||400));
+    await dbError(db.from("game_characters").update({position:{x,y},updated_at:new Date().toISOString()}).eq("id",character.id));
+    res.json({position:{x,y}});
+  } catch(error) { console.error("move:",error.message); res.status(500).json({error:"Não foi possível mover o personagem."}); }
 });
 
 app.post("/api/worlds", auth, async (req, res) => {
