@@ -398,7 +398,7 @@ app.get("/api/worlds/:id", auth, async (req, res) => {
     if (!own) return res.status(403).json({ error: "Você não está neste habitat. Use o código para visitá-lo." });
     const [world, characters, events] = await Promise.all([
       dbError(db.from("game_worlds").select("id, name, invite_code").eq("id", req.params.id).single()),
-      dbError(db.from("game_characters").select("id, owner_user_id, name, animal, personality, energy, social, position, mood, updated_at, home_world_id, current_world_id").eq("current_world_id", req.params.id)),
+      dbError(db.from("game_characters").select("id, owner_user_id, name, animal, personality, energy, social, position, mood, current_action, updated_at, home_world_id, current_world_id").eq("current_world_id", req.params.id)),
       dbError(db.from("game_events").select("id, actor_user_id, description, created_at").eq("world_id", req.params.id).order("created_at", { ascending: false }).limit(40))
     ]);
     const ids = characters.map(c => c.id).sort();
@@ -503,6 +503,19 @@ app.post("/api/worlds/:id/chat", auth, async (req, res) => {
   }
 });
 
+function defaultHabitatEnvironment(existing = {}) {
+  const base = existing && typeof existing === "object" ? existing : {};
+  const objects = Array.isArray(base.objects) && base.objects.length ? base.objects : [
+    { id:"lago", type:"water", name:"Lago", x:1220, y:760, amount:999 },
+    { id:"frutas_1", type:"food", name:"Arbusto de frutas", x:350, y:300, amount:5 },
+    { id:"frutas_2", type:"food", name:"Arbusto de frutas", x:860, y:690, amount:5 },
+    { id:"abrigo", type:"shelter", name:"Abrigo", x:700, y:260, amount:999 },
+    { id:"rochas", type:"rest", name:"Pedras aquecidas", x:480, y:820, amount:999 }
+  ];
+  return { biome:"bosque acolhedor", season:"primavera", weather:"ensolarado", time:"manhã", resources:"abundantes", ...base, objects };
+}
+function distance2d(a,b) { return Math.hypot(Number(a.x)-Number(b.x), Number(a.y)-Number(b.y)); }
+
 app.post("/api/worlds/:id/tick", auth, async (req, res) => {
   try {
     const worldId = req.params.id;
@@ -514,19 +527,41 @@ app.post("/api/worlds/:id/tick", auth, async (req, res) => {
     const chars = await dbError(db.from("game_characters").select("*").eq("current_world_id", worldId));
     if (!chars.length) return res.status(400).json({ error: "Este habitat ainda não tem personagens." });
     const { data: state } = await db.from("game_world_state").select("*").eq("world_id", worldId).maybeSingle();
-    const environment = state?.environment || { season: "primavera", weather: "ensolarado", time: "manhã", resources: "abundantes" };
+    const environment = defaultHabitatEnvironment(state?.environment);
     const shared = await getSharedKnowledge(worldId, 25);
-    const prompt = `Simule um pequeno intervalo de vida em um habitat natural compartilhado. Os habitantes podem compartilhar conhecimentos coletivos como relatos de outros lugares, sem fingir que viveram essas experiências. REGRA DE CONHECIMENTO DO NOSSO MUNDO: o modelo pode possuir conhecimento geral próprio, mas NÃO deve usá-lo para responder como se o habitante soubesse. Para fatos sobre pessoas, lugares, história, ciência, esportes ou qualquer assunto externo ao habitat, use exclusivamente: (1) conhecimento individual listado no personagem, (2) memórias individuais que contenham explicitamente o fato, (3) ensinamentos/relatos presentes na memória coletiva fornecida, ou (4) informação que o interlocutor acabou de fornecer nesta mensagem. Se não houver apoio explícito nessas fontes, o habitante deve admitir que não sabe, demonstrar curiosidade e perguntar; nunca completar lacunas com conhecimento pré-treinado, pesquisa implícita, palpites ou invenções. Diferencie aprendizado próprio, relato recebido e experiência vivida. Não transforme uma resposta recém-gerada em conhecimento prévio. Memória coletiva recente: ${JSON.stringify(shared)}. Personagens: ${JSON.stringify(chars.map(c => ({id:c.id,name:c.name,animal:c.animal,personality:c.personality,mood:c.mood,energy:c.energy,social:c.social,position:c.position||{x:600,y:400},knowledge:c.knowledge||[],memories:(c.memories||[]).slice(-8),goals:c.goals||[]})))}. Ambiente: ${JSON.stringify(environment)}. IMPORTANTE: knowledge, memories e goals de cada personagem são PRIVADOS e pertencem somente ao ID daquele personagem. Nunca transfira, atribua ou use a memória privada de um personagem como se outro a conhecesse. Só a memória coletiva acima pode ser conhecida pelos habitantes deste habitat, como relato de terceiros. Um visitante traz suas próprias lembranças consigo, mas elas não são automaticamente reveladas aos moradores. Só registre que outro personagem aprendeu algo se houver uma interação explícita no evento. Os animais são totalmente AUTÔNOMOS: ninguém os controla. Em cada intervalo, decida uma ação concreta por personagem, respeitando energia, personalidade, necessidades, posição e ambiente. Eles caminham pelo mapa (x entre 60 e 1540, y entre 60 e 940), escolhem destinos, descansam, exploram, brincam, procuram água e alimento, interagem com objetos naturais e com outros animais. O habitat tem lago no setor leste (aprox. x=1220,y=760), clareiras, árvores e trilhas; use esses locais de forma coerente. Não diga que bebeu, comeu ou usou algo se não moveu o personagem para perto e não descreveu a ação. Não fique parado indefinidamente: alterne atividades e repouso. Inclua no evento a ação observável. Evite violência gratuita, crueldade e mudanças bruscas. Preserve fatos e relações anteriores. Retorne JSON: { "events":[{"description":"narração curta em português","character_ids":["id"]}], "characters":[{"id":"id","mood":"emoção curta","energy":0-100,"social":0-100,"position":{"x":600,"y":400},"action":"ação visível curta","memory":"lembrança curta nova ou vazia","goal":"objetivo atual curto ou vazio"}], "environment":{"season":"...","weather":"...","time":"...","resources":"..."} }. Use somente IDs fornecidos. No máximo 4 eventos e 1 atualização por personagem.`;
+    const prompt = `Simule um pequeno intervalo de vida em um habitat natural compartilhado. Os habitantes podem compartilhar conhecimentos coletivos como relatos de outros lugares, sem fingir que viveram essas experiências. REGRA DE CONHECIMENTO DO NOSSO MUNDO: o modelo pode possuir conhecimento geral próprio, mas NÃO deve usá-lo para responder como se o habitante soubesse. Para fatos sobre pessoas, lugares, história, ciência, esportes ou qualquer assunto externo ao habitat, use exclusivamente: (1) conhecimento individual listado no personagem, (2) memórias individuais que contenham explicitamente o fato, (3) ensinamentos/relatos presentes na memória coletiva fornecida, ou (4) informação que o interlocutor acabou de fornecer nesta mensagem. Se não houver apoio explícito nessas fontes, o habitante deve admitir que não sabe, demonstrar curiosidade e perguntar; nunca completar lacunas com conhecimento pré-treinado, pesquisa implícita, palpites ou invenções. Diferencie aprendizado próprio, relato recebido e experiência vivida. Não transforme uma resposta recém-gerada em conhecimento prévio. Memória coletiva recente: ${JSON.stringify(shared)}. Personagens: ${JSON.stringify(chars.map(c => ({id:c.id,name:c.name,animal:c.animal,personality:c.personality,mood:c.mood,energy:c.energy,social:c.social,position:c.position||{x:600,y:400},current_action:c.current_action||"Explorando",knowledge:c.knowledge||[],memories:(c.memories||[]).slice(-8),goals:c.goals||[]})))}. Ambiente: ${JSON.stringify(environment)}. IMPORTANTE: knowledge, memories e goals de cada personagem são PRIVADOS e pertencem somente ao ID daquele personagem. Nunca transfira, atribua ou use a memória privada de um personagem como se outro a conhecesse. Só a memória coletiva acima pode ser conhecida pelos habitantes deste habitat, como relato de terceiros. Um visitante traz suas próprias lembranças consigo, mas elas não são automaticamente reveladas aos moradores. Só registre que outro personagem aprendeu algo se houver uma interação explícita no evento. Os animais são totalmente AUTÔNOMOS: ninguém os controla. Em cada intervalo, decida uma ação concreta por personagem, respeitando energia, personalidade, necessidades, posição e ambiente. Eles caminham pelo mapa (x entre 60 e 1540, y entre 60 e 940), escolhem destinos, descansam, exploram, brincam, procuram água e alimento, interagem com objetos naturais e com outros animais. Objetos reais disponíveis (use suas coordenadas): ${JSON.stringify(environment.objects)}. Para beber, aproxime-se do lago; para comer, aproxime-se de um arbusto de frutas; para descansar, aproxime-se do abrigo ou das pedras. Cada objeto tem quantidade limitada quando aplicável. Escolha uma ação que combine com o local alcançável neste intervalo. Não diga que bebeu, comeu ou usou algo se não moveu o personagem para perto e não descreveu a ação. Não fique parado indefinidamente: alterne atividades e repouso. Inclua no evento a ação observável. Evite violência gratuita, crueldade e mudanças bruscas. Preserve fatos e relações anteriores. Retorne JSON: { "events":[{"description":"narração curta em português","character_ids":["id"]}], "characters":[{"id":"id","mood":"emoção curta","energy":0-100,"social":0-100,"position":{"x":600,"y":400},"action":"ação visível curta (Explorando, Caminhando, Bebendo água, Comendo frutas, Descansando, Brincando)","memory":"lembrança curta nova ou vazia","goal":"objetivo atual curto ou vazio"}], "environment":{"season":"...","weather":"...","time":"...","resources":"..."} }. Use somente IDs fornecidos. No máximo 4 eventos e 1 atualização por personagem.`;
     const result = await gemini(prompt);
     const allowed = new Set(chars.map(c => c.id));
     const updates = Array.isArray(result.characters) ? result.characters.filter(c => allowed.has(c.id)) : [];
     for (const update of updates) {
       const old = chars.find(c => c.id === update.id);
+      const oldPosition = old.position || { x:600, y:400 };
+      const proposed = update.position && Number.isFinite(Number(update.position.x)) && Number.isFinite(Number(update.position.y)) ? { x:Math.max(60,Math.min(1540,Number(update.position.x))), y:Math.max(60,Math.min(940,Number(update.position.y))) } : oldPosition;
+      const travel = distance2d(oldPosition, proposed);
+      const position = travel > 190 ? { x:oldPosition.x + (proposed.x-oldPosition.x)*190/travel, y:oldPosition.y + (proposed.y-oldPosition.y)*190/travel } : proposed;
+      const requestedAction = String(update.action || "Explorando").slice(0,80);
+      const actionKey = requestedAction.toLowerCase();
+      let currentAction = "Explorando";
+      let energy = Math.max(0,Math.min(100,Number(update.energy ?? old.energy) || 0));
+      let social = Math.max(0,Math.min(100,Number(update.social ?? old.social) || 0));
+      const objectType = /beb|água|agua|lago/.test(actionKey) ? "water" : /com|frut|aliment|comid/.test(actionKey) ? "food" : /descans|dorm|repous|abrigo/.test(actionKey) ? "shelter" : /brinc|interag|social/.test(actionKey) ? "social" : null;
+      if (objectType === "water" || objectType === "food" || objectType === "shelter") {
+        const candidates = environment.objects.filter(o => o.type === objectType && (objectType !== "food" || Number(o.amount) > 0));
+        const target = candidates.sort((a,b)=>distance2d(position,a)-distance2d(position,b))[0];
+        if (target && distance2d(position,target) <= 95) {
+          if (objectType === "water") { currentAction = "Bebendo água"; energy = Math.min(100,energy+5); }
+          if (objectType === "food") { currentAction = "Comendo frutas"; target.amount = Math.max(0,Number(target.amount)-1); energy = Math.min(100,energy+14); }
+          if (objectType === "shelter") { currentAction = "Descansando no abrigo"; energy = Math.min(100,energy+12); }
+        } else currentAction = "Caminhando pelo habitat";
+      } else if (objectType === "social") {
+        const companion = chars.filter(x=>x.id!==old.id).sort((a,b)=>distance2d(position,a.position||{x:600,y:400})-distance2d(position,b.position||{x:600,y:400}))[0];
+        if (companion && distance2d(position,companion.position||{x:600,y:400})<=115) { currentAction="Brincando com "+companion.name; social=Math.min(100,social+8); }
+        else currentAction="Explorando";
+      } else if (/descans|dorm|repous/.test(actionKey)) currentAction="Procurando um lugar para descansar";
+      else if (/explor|caminh|passe/.test(actionKey)) currentAction="Explorando";
       const patch = {
         mood: String(update.mood || old.mood || "tranquilo").slice(0,40),
-        energy: Math.max(0, Math.min(100, Number(update.energy ?? old.energy) || 0)),
-        social: Math.max(0, Math.min(100, Number(update.social ?? old.social) || 0)),
-        position: update.position && Number.isFinite(Number(update.position.x)) && Number.isFinite(Number(update.position.y)) ? { x: Math.max(60,Math.min(1540,Number(update.position.x))), y: Math.max(60,Math.min(940,Number(update.position.y))) } : old.position,
+        energy, social, position, current_action:currentAction,
         updated_at: new Date().toISOString()
       };
       if (update.memory && String(update.memory).trim()) patch.memories = [...(old.memories || []), { text:String(update.memory).slice(0,250), at:new Date().toISOString() }].slice(-40);
@@ -536,7 +571,8 @@ app.post("/api/worlds/:id/tick", auth, async (req, res) => {
     }
     const descriptions = Array.isArray(result.events) ? result.events.slice(0,4).map(e => String(e.description || "").trim().slice(0,450)).filter(Boolean) : [];
     for (const description of descriptions) await dbError(db.from("game_events").insert({ world_id:worldId, actor_user_id:null, description }));
-    const newEnvironment = result.environment && typeof result.environment === "object" ? result.environment : environment;
+    const newEnvironment = defaultHabitatEnvironment(result.environment && typeof result.environment === "object" ? { ...environment, ...result.environment, objects:environment.objects } : environment);
+    for (const object of newEnvironment.objects) if (object.type === "food" && Number(object.amount) < 5) object.amount = Math.min(5,Number(object.amount)+1);
     await dbError(db.from("game_world_state").upsert({ world_id:worldId, environment:newEnvironment, last_tick_at:new Date().toISOString() }, { onConflict:"world_id" }));
     res.json({ events: descriptions, updated: updates.length, environment: newEnvironment });
   } catch (error) {
