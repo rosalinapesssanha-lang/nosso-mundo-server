@@ -10,7 +10,28 @@
 #modal{position:fixed;inset:0;background:#0009;z-index:10;display:grid;place-items:center;padding:14px}.modalCard{width:min(620px,100%);max-height:90%;overflow:auto;background:#1b3029;border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 20px 60px #0009}.modalHead{display:flex;justify-content:space-between;align-items:center;gap:10px}.modalHead h2{margin:0}.close{background:#304b3c;color:white}.feed{max-height:210px;overflow:auto;background:#10221c;border-radius:12px;padding:10px;margin:10px 0}.bubble{padding:8px 10px;margin:7px 0;border-radius:10px;background:#294638}.bubble.mine{background:#344a35}.event{padding:8px 0;border-bottom:1px solid #354d3c}.queueItem{padding:9px;background:#10221c;border-radius:10px;margin:7px 0}.progress{height:7px;background:#405447;border-radius:8px;margin:6px 0;overflow:hidden}.progress i{display:block;height:100%;background:var(--gold)}
 #rotate{display:none;position:fixed;inset:0;z-index:30;background:#101f1b;place-items:center;text-align:center;padding:30px}#rotate .phone{font-size:50px}
 @media(max-width:700px){.layout{grid-template-columns:1fr;padding:6px;gap:6px}.side{display:none}.topbar{height:52px;padding:6px 8px}.brand{font-size:13px}.topActions button{font-size:11px;padding:7px}.bottomBar{display:flex;gap:6px;padding:6px;background:#182c24;border-top:1px solid #3b5846}.bottomBar button{flex:1;font-size:11px;padding:9px 3px}.mapHint{font-size:10px}}
-@media(orientation:portrait) and (max-width:900px){#rotate{display:grid}}
+/* Layout adaptável: não bloquear a tela quando o celular estiver na vertical. */
+@media(max-width:700px){
+  #game{height:100dvh;height:100%;min-height:0}
+  .layout{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);min-height:0;flex:1;padding:6px;gap:6px}
+  .mapWrap{min-height:0;width:100%;height:100%}
+  #worldCanvas{width:100%;height:100%}
+  .side{display:none}
+  .topbar{height:auto;min-height:48px;padding:5px 6px;gap:6px}
+  .brand{font-size:11px}
+  .worldTitle small{font-size:10px}
+  .topActions{gap:4px}
+  .topActions button{font-size:10px;padding:7px 6px}
+  .bottomBar{display:flex;flex:none;gap:5px;padding:5px}
+  .bottomBar button{font-size:11px;padding:9px 2px;min-width:0}
+  .mapHint{font-size:10px;left:6px;bottom:6px}
+}
+@media(max-width:420px){
+  .brand{display:none}
+  .topActions button{font-size:9px;padding:7px 5px}
+  .worldTitle strong{font-size:12px}
+}
+#rotate{display:none!important}
 </style></head>
 <body>
 <section id="authScreen"><div class="authCard"><div class="logo">🌿</div><h1>Nosso Mundo</h1><p class="muted">Entre no seu habitat, explore e encontre outros habitantes.</p>
