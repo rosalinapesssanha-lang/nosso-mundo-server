@@ -58,24 +58,42 @@ async function isMember(worldId, userId) {
 async function gemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("A chave GEMINI_API_KEY não está configurada no Render.");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Nunca diga que executou ações que não foram incluídas no JSON. Responda somente JSON válido, sem markdown." }] },
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.85, responseMimeType: "application/json" }
-    }),
-    signal: AbortSignal.timeout(25000)
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = data?.error?.message || `Gemini retornou HTTP ${response.status}`;
-    throw new Error(message.slice(0, 400));
+  const payload = {
+    systemInstruction: { parts: [{ text: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Nunca diga que executou ações que não foram incluídas no JSON. Responda somente JSON válido, sem markdown." }] },
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.85, responseMimeType: "application/json" }
+  };
+
+  // Retenta erros temporários de sobrecarga/limite da API, sem duplicar gravações no banco.
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(25000)
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = data?.error?.message || `Gemini retornou HTTP ${response.status}`;
+        const error = new Error(message.slice(0, 400));
+        if (![429, 500, 502, 503, 504].includes(response.status)) throw error;
+        lastError = error;
+      } else {
+        const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+        if (!raw) throw new Error("O Gemini não retornou conteúdo.");
+        return JSON.parse(raw);
+      }
+    } catch (error) {
+      lastError = error;
+      if (error.name !== "TimeoutError" && !/fetch failed|network/i.test(error.message || "")) {
+        if (!/HTTP 429|HTTP 500|HTTP 502|HTTP 503|HTTP 504|high demand|overload|temporarily unavailable/i.test(error.message || "")) throw error;
+      }
+    }
+    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1800 * (attempt + 1)));
   }
-  const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-  if (!raw) throw new Error("O Gemini não retornou conteúdo.");
-  return JSON.parse(raw);
+  throw new Error(`O Gemini está temporariamente sobrecarregado após 3 tentativas. Tente novamente em alguns minutos. Detalhe: ${lastError?.message || "sem resposta"}`);
 }
 
 app.get("/", (_req, res) => res.json({
