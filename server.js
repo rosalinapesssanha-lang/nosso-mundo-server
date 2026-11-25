@@ -110,7 +110,7 @@ app.post("/api/register", async (req, res) => {
     const password = String(req.body.password || "");
     const animal = String(req.body.animal || "");
     if (!validUsername(username)) return res.status(400).json({ error: "Usuário: 3 a 20 caracteres, letras, números ou _." });
-    if (!/^\\d{4}$/.test(password)) return res.status(400).json({ error: "O PIN deve ter exatamente 4 números." });
+    if (!/^\d{4}$/.test(password)) return res.status(400).json({ error: "O PIN deve ter exatamente 4 números." });
     if (!animals.includes(animal)) return res.status(400).json({ error: "Escolha um animal válido." });
     const password_hash = await bcrypt.hash(password, 12);
     const user = await dbError(db.from("game_users").insert({ username, password_hash }).select("id, username").single());
@@ -132,7 +132,7 @@ app.post("/api/login", async (req, res) => {
   try {
     const username = cleanUsername(req.body.username);
     const password = String(req.body.password || "");
-    if (!/^\\d{4}$/.test(password)) return res.status(400).json({ error: "Digite seu PIN de 4 números." });
+    if (!password || password.length > 72) return res.status(400).json({ error: "Digite seu PIN ou sua senha antiga." });
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     const key = ip + ":" + username.toLowerCase();
     const attempts = loginFailures.get(key) || { count: 0, until: 0 };
@@ -155,7 +155,7 @@ app.post("/api/login", async (req, res) => {
 app.post("/api/change-pin", auth, async (req, res) => {
   try {
     const pin = String(req.body.pin || "");
-    if (!/^\\d{4}$/.test(pin)) return res.status(400).json({ error: "O novo PIN deve ter exatamente 4 números." });
+    if (!/^\d{4}$/.test(pin)) return res.status(400).json({ error: "O novo PIN deve ter exatamente 4 números." });
     const password_hash = await bcrypt.hash(pin, 12);
     await dbError(db.from("game_users").update({ password_hash }).eq("id", req.user.sub));
     res.json({ ok: true, message: "PIN atualizado." });
