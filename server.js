@@ -250,6 +250,30 @@ app.post("/api/worlds/:id/teach", auth, async (req, res) => {
   }
 });
 
+
+app.post("/api/worlds/:id/chat", auth, async (req, res) => {
+  try {
+    const worldId = req.params.id;
+    if (!await isMember(worldId, req.user.sub)) return res.status(403).json({ error: "Você não faz parte deste mundo." });
+    const message = String(req.body.message || "").trim().slice(0, 1200);
+    if (message.length < 1) return res.status(400).json({ error: "Escreva uma mensagem." });
+    const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", req.user.sub).single());
+    const history = (character.memories || []).slice(-12).map(m => typeof m === "string" ? m : m.text || "").filter(Boolean);
+    const prompt = "Você interpreta um personagem de uma simulação de habitat. Responda como ele, com linguagem natural, curiosidade e personalidade coerente. Não afirme ser uma pessoa real nem possuir consciência comprovada; você é um personagem virtual. Use os conhecimentos e lembranças fornecidos. Se não souber algo, admita e faça perguntas. Não invente que realizou ações no mundo. Personagem: " + JSON.stringify({name:character.name, animal:character.animal, personality:character.personality, mood:character.mood, knowledge:character.knowledge || [], memories:history}) + ". Mensagem humana: " + JSON.stringify(message) + ". Retorne JSON válido com: reply (resposta em português, até 900 caracteres), memory (uma lembrança curta desta conversa, até 250 caracteres), knowledge (array de zero a dois aprendizados novos e úteis; não inclua opiniões passageiras nem repita conhecimento existente).";
+    const result = await gemini(prompt);
+    const reply = String(result.reply || "Não consegui formular uma resposta agora. Pode perguntar de outro jeito?").slice(0, 1000);
+    const memories = [...(character.memories || []), { text: "Conversa — humano: " + message.slice(0,180) + " | " + String(result.memory || reply).slice(0,250), at: new Date().toISOString() }].slice(-40);
+    const newKnowledge = Array.isArray(result.knowledge) ? result.knowledge.map(x => String(x).slice(0,250)).filter(Boolean).slice(0,2) : [];
+    const knowledge = [...(character.knowledge || []), ...newKnowledge].slice(-60);
+    await dbError(db.from("game_characters").update({ memories, knowledge, updated_at: new Date().toISOString() }).eq("id", character.id));
+    await dbError(db.from("game_events").insert({ world_id: worldId, actor_user_id: req.user.sub, description: character.name + " conversou: " + reply.slice(0,300) }));
+    res.json({ reply, learned: newKnowledge });
+  } catch (error) {
+    console.error("chat:", error.message);
+    res.status(502).json({ error: "Não consegui conversar agora: " + error.message });
+  }
+});
+
 app.post("/api/worlds/:id/tick", auth, async (req, res) => {
   try {
     const worldId = req.params.id;
