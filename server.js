@@ -19,7 +19,8 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
-const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "gemini-2.5-flash")
+// Modelos alternativos só são usados quando explicitamente configurados e validados no AI Studio.
+const GEMINI_FALLBACK_MODELS = (process.env.GEMINI_FALLBACK_MODELS || "")
   .split(",").map(x => x.trim()).filter(x => x && x !== GEMINI_MODEL);
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !JWT_SECRET) {
@@ -62,7 +63,7 @@ async function isMember(worldId, userId) {
 }
 async function gemini(prompt) {
   if (!GEMINI_API_KEY) throw new Error("A chave GEMINI_API_KEY não está configurada no Render.");
-  const models = [GEMINI_MODEL, ...GEMINI_FALLBACK_MODELS];
+  const models = [...new Set([GEMINI_MODEL, ...GEMINI_FALLBACK_MODELS])];
   const payload = {
     systemInstruction: { parts: [{ text: "Você é o motor de personagens de uma simulação de habitat. Preserve continuidade, personalidade e conhecimento. Nunca diga que executou ações que não foram incluídas no JSON. Responda somente JSON válido, sem markdown." }] },
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -74,7 +75,7 @@ async function gemini(prompt) {
   // Tenta o modelo principal e, se ele estiver congestionado, troca automaticamente.
   for (const model of models) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const response = await fetch(url, {
           method: "POST",
@@ -99,11 +100,11 @@ async function gemini(prompt) {
           /fetch failed|network|HTTP 408|HTTP 429|HTTP 500|HTTP 502|HTTP 503|HTTP 504|high demand|overload|temporarily unavailable/i.test(error.message || "");
         if (!transient) throw error;
       }
-      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1200));
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, [3000, 8000][attempt]));
     }
     console.warn(`Gemini indisponível no modelo ${model}; tentando o próximo modelo.`);
   }
-  throw new Error(`Todos os modelos Gemini configurados estão temporariamente indisponíveis. Modelos tentados: ${models.join(", ")}. Detalhe: ${lastError?.message || "sem resposta"}`);
+  throw new Error(`O modelo Gemini ${GEMINI_MODEL} continua indisponível após novas tentativas. ${GEMINI_FALLBACK_MODELS.length ? "Modelos alternativos configurados: " + GEMINI_FALLBACK_MODELS.join(", ") + ". " : "Nenhum modelo alternativo foi configurado, para evitar usar IDs descontinuados. "}Detalhe: ${lastError?.message || "sem resposta"}`);
 }
 
 app.get("/", (_req, res) => res.json({
