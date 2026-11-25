@@ -152,6 +152,19 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+app.post("/api/change-pin", auth, async (req, res) => {
+  try {
+    const pin = String(req.body.pin || "");
+    if (!/^\\d{4}$/.test(pin)) return res.status(400).json({ error: "O novo PIN deve ter exatamente 4 números." });
+    const password_hash = await bcrypt.hash(pin, 12);
+    await dbError(db.from("game_users").update({ password_hash }).eq("id", req.user.sub));
+    res.json({ ok: true, message: "PIN atualizado." });
+  } catch (error) {
+    console.error("change pin:", error.message);
+    res.status(500).json({ error: "Não foi possível atualizar o PIN." });
+  }
+});
+
 app.get("/api/me", auth, async (req, res) => {
   try {
     const character = await dbError(db.from("game_characters").select("*").eq("owner_user_id", req.user.sub).maybeSingle());
